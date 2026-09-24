@@ -90,8 +90,11 @@ void MapMemoryNode::integrateCostmap() {
 
       int8_t value = latest_costmap_.data[y * costmap_width + x];
 
-      // If a cell in the new costmap is unknown (-1), retain the previous value in the global map
-      if (value < 0) {
+      // Only stitch cells where the costmap actually detected something (value > 0).
+      // The costmap starts every scan at 0, so 0 means "nothing detected here", which also
+      // covers spots hidden behind other obstacles. Writing those 0s would erase walls we
+      // already know about, so 0 (and unknown -1) are treated as "no new info" and the old value is kept.
+      if (value <= 0) {
         continue;
       }
 
@@ -115,7 +118,7 @@ void MapMemoryNode::integrateCostmap() {
         continue;
       }
 
-      // Known value (occupied or free): overwrite, new data wins over old data
+      // Detected value: overwrite, new data wins over old data
       global_map_.data[map_y * width_ + map_x] = value;
     }
   }
