@@ -51,6 +51,7 @@ void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
   double qz = msg->pose.pose.orientation.z;
   double qw = msg->pose.pose.orientation.w;
   robot_yaw_ = std::atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  odom_received_ = true;
 
   // Compute distance traveled
   double distance = std::sqrt(std::pow(robot_x_ - last_x_, 2) + std::pow(robot_y_ - last_y_, 2));
@@ -63,12 +64,17 @@ void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
 
 // Timer-based map update
 void MapMemoryNode::updateMap() {
-  if (should_update_map_ && costmap_updated_) {
+  // before the first odometry message the robot's position is unknown (it would default to 0,0),
+  // so stitching then would put the whole costmap in the wrong place
+  if (should_update_map_ && costmap_updated_ && odom_received_) {
     integrateCostmap();
-    global_map_.header.stamp = this->now();
-    map_pub_->publish(global_map_);
     should_update_map_ = false;
   }
+
+  // publish every tick, not only after an update: if the planner missed a message
+  // (e.g. it was still starting up) it gets the map again a second later
+  global_map_.header.stamp = this->now();
+  map_pub_->publish(global_map_);
 }
 
 // Integrate the latest costmap into the global map

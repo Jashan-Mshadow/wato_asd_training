@@ -46,6 +46,7 @@ class MapMemoryNode : public rclcpp::Node {
     // Flags
     bool costmap_updated_ = false;
     bool should_update_map_ = true;   // true at startup so a map gets published on initialization
+    bool odom_received_ = false;      // don't stitch until we know where the robot is
 
     // Global map settings. The costmap is 0.1 m per cell, so the map is coarser (0.2 m per cell).
     // The wiki says the costmap resolution should be finer than the map's, so no holes are left.
