@@ -55,6 +55,13 @@ void PlannerNode::timerCallback() {
     if (goalReached()) {
       RCLCPP_INFO(this->get_logger(), "Goal reached!");
       state_ = State::WAITING_FOR_GOAL;
+
+      // an empty path tells the control node to stop now, instead of creeping
+      // towards the exact last path point (it could circle it forever)
+      nav_msgs::msg::Path empty_path;
+      empty_path.header.stamp = this->now();
+      empty_path.header.frame_id = current_map_.header.frame_id;
+      path_pub_->publish(empty_path);
       return;
     }
 
