@@ -104,7 +104,7 @@ class PlannerNode : public rclcpp::Node {
     rclcpp::Time goal_start_time_;
 
     static constexpr double goal_threshold_ = 0.5;     // metres, close enough to count as reached
-    static constexpr double timeout_seconds_ = 120.0;  // give up on a goal after this long
+    static constexpr double timeout_seconds_ = 300.0;  // give up on a goal after this long (real seconds, the sim can run slower)
     static constexpr int8_t obstacle_cost_ = 100;      // cells with this cost are obstacles, never enter them
 };
 
