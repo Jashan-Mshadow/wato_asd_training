@@ -1,132 +1,107 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
-#include <vector>
 
 #include "map_memory_node.hpp"
 
 MapMemoryNode::MapMemoryNode() : Node("map_memory"), map_memory_(robot::MapMemoryCore(this->get_logger())) {
-
-  // listen to node 1's costmap
+  // Initialize subscribers
   costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-      "/costmap", 10,
-      std::bind(&MapMemoryNode::costmapCallback, this, std::placeholders::_1));
-
-  // listen to where the robot is
+      "/costmap", 10, std::bind(&MapMemoryNode::costmapCallback, this, std::placeholders::_1));
   odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "/odom/filtered", 10,
-      std::bind(&MapMemoryNode::odomCallback, this, std::placeholders::_1));
+      "/odom/filtered", 10, std::bind(&MapMemoryNode::odomCallback, this, std::placeholders::_1));
 
+  // Initialize publisher
   map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/map", 10);
 
-  // the big map starts out completely empty
-  int total_cells = width_ * height_;
-  big_map_.assign(total_cells, 0);
-
-  // publish once a second, even if nothing changed, so the planner always has a map
+  // Initialize timer (every 1 second)
   timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(1000),
-      std::bind(&MapMemoryNode::publishMap, this));
-}
+      std::chrono::seconds(1), std::bind(&MapMemoryNode::updateMap, this));
 
-// just hang on to the newest costmap, the timer decides when to use it
-void MapMemoryNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr new_costmap) {
-  latest_costmap_ = *new_costmap;
-  have_costmap_ = true;
-}
+  // Set up the global map (in world coordinates)
+  global_map_.header.frame_id = "sim_world";
+  global_map_.info.resolution = resolution_;
+  global_map_.info.width = width_;
+  global_map_.info.height = height_;
+  global_map_.info.origin.position.x = origin_x_;
+  global_map_.info.origin.position.y = origin_y_;
+  global_map_.info.origin.orientation.w = 1.0;
 
-void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr odom) {
-
-  robot_x_ = odom->pose.pose.position.x;
-  robot_y_ = odom->pose.pose.position.y;
-
-  // the heading is stored as a quaternion (4 numbers), we only care about the flat spin
-  double qx = odom->pose.pose.orientation.x;
-  double qy = odom->pose.pose.orientation.y;
-  double qz = odom->pose.pose.orientation.z;
-  double qw = odom->pose.pose.orientation.w;
-
-  double top = 2.0 * (qw * qz + qx * qy);
-  double bottom = 1.0 - 2.0 * (qy * qy + qz * qz);
-
-  robot_heading_ = std::atan2(top, bottom);
-}
-
-void MapMemoryNode::publishMap() {
-
-  // nothing from node 1 yet, so just send the empty map
-  if (have_costmap_) {
-
-    // how far have we moved since the last time we pasted something in?
-    double dx = robot_x_ - last_paste_x_;
-    double dy = robot_y_ - last_paste_y_;
-    double distance_moved = std::sqrt(dx * dx + dy * dy);
-
-    // first time through we always paste, after that only once we've actually driven somewhere
-    bool far_enough = distance_moved >= distance_between_updates_;
-
-    if (!pasted_once_ || far_enough) {
-      pasteCostmapIntoMap();
-
-      last_paste_x_ = robot_x_;
-      last_paste_y_ = robot_y_;
-      pasted_once_ = true;
-    }
+  // every cell starts at 0 (free), same default as the costmap
+  for (int i = 0; i < width_ * height_; ++i) {
+    global_map_.data.push_back(0);
   }
-
-  nav_msgs::msg::OccupancyGrid msg;
-
-  msg.header.stamp = this->now();
-  msg.header.frame_id = "sim_world";   // this map is in world coordinates, not robot coordinates
-
-  msg.info.resolution = resolution_;
-  msg.info.width = width_;
-  msg.info.height = height_;
-  msg.info.origin.position.x = origin_x_;
-  msg.info.origin.position.y = origin_y_;
-  msg.info.origin.orientation.w = 1.0;
-
-  msg.data = big_map_;
-
-  map_pub_->publish(msg);
 }
 
-// take the costmap (drawn from the robot's point of view) and stamp it onto the big world map
-void MapMemoryNode::pasteCostmapIntoMap() {
+// Callback for costmap updates
+void MapMemoryNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  // Store the latest costmap
+  latest_costmap_ = *msg;
+  costmap_updated_ = true;
+}
 
+// Callback for odometry updates
+void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+  robot_x_ = msg->pose.pose.position.x;
+  robot_y_ = msg->pose.pose.position.y;
+
+  // quaternion -> yaw (the robot's heading on the flat ground)
+  double qx = msg->pose.pose.orientation.x;
+  double qy = msg->pose.pose.orientation.y;
+  double qz = msg->pose.pose.orientation.z;
+  double qw = msg->pose.pose.orientation.w;
+  robot_yaw_ = std::atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+
+  // Compute distance traveled
+  double distance = std::sqrt(std::pow(robot_x_ - last_x_, 2) + std::pow(robot_y_ - last_y_, 2));
+  if (distance >= distance_threshold_) {
+    last_x_ = robot_x_;
+    last_y_ = robot_y_;
+    should_update_map_ = true;
+  }
+}
+
+// Timer-based map update
+void MapMemoryNode::updateMap() {
+  if (should_update_map_ && costmap_updated_) {
+    integrateCostmap();
+    global_map_.header.stamp = this->now();
+    map_pub_->publish(global_map_);
+    should_update_map_ = false;
+  }
+}
+
+// Integrate the latest costmap into the global map
+void MapMemoryNode::integrateCostmap() {
   int costmap_width = latest_costmap_.info.width;
   int costmap_height = latest_costmap_.info.height;
   double costmap_resolution = latest_costmap_.info.resolution;
   double costmap_origin_x = latest_costmap_.info.origin.position.x;
   double costmap_origin_y = latest_costmap_.info.origin.position.y;
 
-  // precompute these, they are the same for every cell
-  double cos_heading = std::cos(robot_heading_);
-  double sin_heading = std::sin(robot_heading_);
-
   for (int y = 0; y < costmap_height; ++y) {
     for (int x = 0; x < costmap_width; ++x) {
 
-      int costmap_index = y * costmap_width + x;
-      int8_t cell_value = latest_costmap_.data[costmap_index];
+      int8_t value = latest_costmap_.data[y * costmap_width + x];
 
-      // empty cells carry no information, skip them so we do not erase walls we already know about
-      if (cell_value <= 0) {
+      // If a cell in the new costmap is unknown (-1), retain the previous value in the global map
+      if (value < 0) {
         continue;
       }
 
-      // where is this cell, in metres, relative to the robot?
-      double local_x = x * costmap_resolution + costmap_origin_x;
-      double local_y = y * costmap_resolution + costmap_origin_y;
+      // centre of this costmap cell, in metres, relative to the robot
+      double local_x = costmap_origin_x + (x + 0.5) * costmap_resolution;
+      double local_y = costmap_origin_y + (y + 0.5) * costmap_resolution;
 
-      // turn it by the robot's heading, then slide it over to the robot's position
-      double world_x = robot_x_ + (local_x * cos_heading - local_y * sin_heading);
-      double world_y = robot_y_ + (local_x * sin_heading + local_y * cos_heading);
+      // Transform into the global frame: rotate by the robot's yaw, then move to the robot's position
+      double world_x = robot_x_ + local_x * std::cos(robot_yaw_) - local_y * std::sin(robot_yaw_);
+      double world_y = robot_y_ + local_x * std::sin(robot_yaw_) + local_y * std::cos(robot_yaw_);
 
-      // metres to a square on the big map
-      int map_x = (world_x - origin_x_) / resolution_;
-      int map_y = (world_y - origin_y_) / resolution_;
+      // metres -> global map cell
+      int map_x = static_cast<int>(std::floor((world_x - origin_x_) / resolution_));
+      int map_y = static_cast<int>(std::floor((world_y - origin_y_) / resolution_));
 
+      // parts of the costmap that land outside the global map are ignored
       if (map_x < 0 || map_x >= width_) {
         continue;
       }
@@ -134,12 +109,8 @@ void MapMemoryNode::pasteCostmapIntoMap() {
         continue;
       }
 
-      int map_index = map_y * width_ + map_x;
-
-      // if we already saw something scarier here, keep the scarier number
-      if (cell_value > big_map_[map_index]) {
-        big_map_[map_index] = cell_value;
-      }
+      // Known value (occupied or free): overwrite, new data wins over old data
+      global_map_.data[map_y * width_ + map_x] = value;
     }
   }
 }
